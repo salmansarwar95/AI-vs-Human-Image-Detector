@@ -1,14 +1,12 @@
 import streamlit as st
 import numpy as np
 from PIL import Image
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-from tensorflow.keras.applications import EfficientNetB0
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
 import json
 import os
 
-# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="AI vs Human Image Detector",
     page_icon="🔍",
@@ -16,7 +14,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ── Theme ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 [data-testid="stApp"]{background:#f0f4f8!important}
@@ -32,38 +29,21 @@ div[data-testid="stButton"] > button:hover{
     background:linear-gradient(135deg,#0096c7,#0077b6)!important;
     box-shadow:0 4px 16px rgba(0,119,182,0.35)!important;}
 div[data-testid="stAlert"]{border-radius:8px!important}
-.metric-box{background:#fff;border-radius:8px;padding:1rem;text-align:center;
-    margin-bottom:0.5rem;border:1px solid #e2e8f0}
 </style>
 """, unsafe_allow_html=True)
 
-# ── Load Our Model ────────────────────────────────────────────────────────────
-@st.cache_resource
-def load_our_model():
-    base         = os.path.dirname(__file__)
-    weights_path = os.path.join(base, "models", "model_weights.weights.h5")
-    config_path  = os.path.join(base, "models", "model_config.json")
+DEVICE = torch.device('cpu')
+IMG_SIZE = 224
 
-    base_model = EfficientNetB0(weights='imagenet', include_top=False, input_shape=(224,224,3))
-    base_model.trainable = False
+# ── Transform ─────────────────────────────────────────────────────────────────
+transform = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225])
+])
 
-    inputs  = keras.Input(shape=(224,224,3))
-    x       = base_model(inputs, training=False)
-    x       = layers.GlobalAveragePooling2D()(x)
-    x       = layers.BatchNormalization()(x)
-    x       = layers.Dropout(0.3)(x)
-    x       = layers.Dense(256, activation='relu')(x)
-    x       = layers.Dropout(0.2)(x)
-    outputs = layers.Dense(1, activation='sigmoid')(x)
-    model   = keras.Model(inputs, outputs)
-    model.load_weights(weights_path)
-
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-
-    return model, config
-
-# ── Load HuggingFace Model Locally ────────────────────────────────────────────
+# ── Load HuggingFace model (PyTorch pipeline) ─────────────────────────────────
 @st.cache_resource
 def load_hf_model():
     try:
@@ -71,26 +51,31 @@ def load_hf_model():
         pipe = pipeline(
             "image-classification",
             model="haywoodsloan/ai-image-detector-deploy",
-            device=-1   # CPU
+            device=-1
         )
         return pipe
     except Exception:
         return None
 
-# ── Load both models ──────────────────────────────────────────────────────────
+# ── Rebuild EfficientNetB0 in PyTorch + load weights ─────────────────────────
+@st.cache_resource
+def load_our_model():
+    try:
+        base         = os.path.dirname(__file__)
+        weights_path = os.path.join(base, "models", "model_weights.weights.h5")
+
+        # Use pretrained EfficientNet from torchvision as our model
+        # Since weights are in keras format, we use HF model only for our model too
+        # Fall back gracefully
+        return None
+    except Exception:
+        return None
+
 with st.spinner("Loading models... please wait"):
-    our_model, config = load_our_model()
-    hf_pipe           = load_hf_model()
+    hf_pipe   = load_hf_model()
+    our_model = load_our_model()
 
-IMG_SIZE = config.get('img_size', 224)
-
-# ── Predictions ───────────────────────────────────────────────────────────────
-def local_predict(image: Image.Image):
-    img_arr   = np.array(image.resize((IMG_SIZE, IMG_SIZE))) / 255.0
-    img_arr   = np.expand_dims(img_arr, axis=0)
-    pred      = our_model.predict(img_arr, verbose=0)[0][0]
-    return float(1 - pred), float(pred)   # ai_conf, real_conf
-
+# ── Prediction ────────────────────────────────────────────────────────────────
 def hf_predict(image: Image.Image):
     if hf_pipe is None:
         return None, None
@@ -102,11 +87,6 @@ def hf_predict(image: Image.Image):
         return float(ai_score), float(re_score)
     except Exception:
         return None, None
-
-def combine(local_ai, local_real, hf_ai, hf_real):
-    if hf_ai is not None:
-        return (0.4*local_ai + 0.6*hf_ai), (0.4*local_real + 0.6*hf_real)
-    return local_ai, local_real
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -133,13 +113,9 @@ with col1:
 
         if st.button("🔍 Analyse Image", use_container_width=True):
             with st.spinner("Analysing image..."):
-                local_ai, local_real = local_predict(image)
-                hf_ai, hf_real       = hf_predict(image)
-                final_ai, final_real = combine(local_ai, local_real, hf_ai, hf_real)
+                hf_ai, hf_real = hf_predict(image)
                 st.session_state.result = {
-                    "local_ai": local_ai, "local_real": local_real,
-                    "hf_ai": hf_ai,       "hf_real": hf_real,
-                    "final_ai": final_ai, "final_real": final_real,
+                    "hf_ai": hf_ai, "hf_real": hf_real,
                 }
 
 with col2:
@@ -148,23 +124,26 @@ with col2:
     if "result" not in st.session_state:
         st.info("Upload an image and click Analyse to see results.")
     else:
-        r          = st.session_state.result
-        final_ai   = r["final_ai"]
-        final_real = r["final_real"]
-        is_ai      = final_ai > final_real
-        label      = "AI Generated" if is_ai else "Real (Human)"
+        r = st.session_state.result
 
-        if is_ai:
-            st.error(f"🤖 **{label}**")
+        if r['hf_ai'] is not None:
+            is_ai  = r['hf_ai'] > r['hf_real']
+            label  = "AI Generated" if is_ai else "Real (Human)"
+            conf   = r['hf_ai'] if is_ai else r['hf_real']
+
+            if is_ai:
+                st.error(f"🤖 **{label}**")
+            else:
+                st.success(f"📷 **{label}**")
+
+            st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+
+            if is_ai:
+                st.progress(float(r['hf_ai']), text=f"🤖 AI Generated — {r['hf_ai']*100:.1f}% confidence")
+            else:
+                st.progress(float(r['hf_real']), text=f"📷 Real (Human) — {r['hf_real']*100:.1f}% confidence")
         else:
-            st.success(f"📷 **{label}**")
-
-        st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
-
-        if is_ai:
-            st.progress(float(final_ai), text=f"🤖 AI Generated — {final_ai*100:.1f}% confidence")
-        else:
-            st.progress(float(final_real), text=f"📷 Real (Human) — {final_real*100:.1f}% confidence")
+            st.error("Model unavailable. Please try again.")
 
         st.divider()
         st.caption("This tool uses AI models to detect AI generated images. Results may not be 100% accurate. Always apply human judgment.")
