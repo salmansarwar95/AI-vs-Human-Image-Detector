@@ -1,8 +1,7 @@
 streamlit
-tensorflow
+torch
+torchvision
+transformers
 numpy
 Pillow
 requests
-transformers
-torch
-torchvision
