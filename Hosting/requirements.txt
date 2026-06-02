@@ -1,9 +1,8 @@
 streamlit
-tensorflow==2.20.0
+tensorflow
 numpy
 Pillow
 requests
 transformers
 torch
 torchvision
- 
